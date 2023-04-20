@@ -1,7 +1,7 @@
 ﻿This repository aims to ensure reproducibility of the results in the paper
 _Dawnn: single-cell differential abundance with neural networks_. The notebook
 to produce the figures in the paper can be found
-[here](github.com/george-hall-ucl/dawnn_paper_results/blob/main/benchmarking_results.md).
+[here](benchmarking_results.md).
 
 The table below shows where to locate the data and code used to generate the
 files read in the above notebook. Taken together, this information should allow
