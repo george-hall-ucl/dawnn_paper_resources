@@ -67,10 +67,12 @@ parse_results <- function(results) {
     results$hline <- 0
     results[results$stat == "tpr", ]$hline <- 10 # Deliberately outside of graph
     results[results$stat == "fdr", ]$hline <- 0.1
-    results$method <- factor(results$method, levels = c("daseq", "milo", "dawnn"),
+    results$method <- factor(results$method,
+                             levels = c("daseq", "milo", "dawnn"),
                              labels = c("DA-seq", "Milo", "Dawnn"))
     results$stat <- factor(results$stat, levels = c("tpr", "fpr", "fdr"),
-                           labels = c("True Positive Rate", "False Positive Rate",
+                           labels = c("True Positive Rate",
+                                      "False Positive Rate",
                                       "False Discovery Rate"))
     # Milo paper used natural logarithm here (i.e. log()), but I think log2 is
     # more natural (e.g. more common with DE analysis).
@@ -100,7 +102,7 @@ plot_accuracy_results <- function(results) {
         theme(axis.text.x = element_text(angle = 45, hjust = 1),
               legend.position = "none", axis.title.y = element_blank(),
               strip.background = element_blank()) +
-        xlab(bquote(Maximum~log[2]*`-fold`~change)) + ylim(0, 1) +
+        xlab(bquote(Maximum~log[2] * `-fold` ~ change)) + ylim(0, 1) +
         facet_grid(cols = vars(method), rows = vars(stat))
 
     return(p)
