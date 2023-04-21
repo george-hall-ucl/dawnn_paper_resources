@@ -408,7 +408,7 @@ squared errors of their estimates of P(Condition1). We also do so for DA-seq.
 
 ```{r pc1_mses, fig.width = 25 / 2.54, fig.height = 20 / 2.54}
 plot_pc1_estimates <- function(results, other_method, other_mses) {
-    mses_df <- data.frame(x = 0.82, y = 0.35, lab = other_mses,
+    mses_df <- data.frame(x = 0.8, y = 0.35, lab = other_mses,
                           cell_type = factor(sort(rep(unique(results$cell_type), 3))),
                           upreg_pc1 = factor(rep(unique(results$upreg_pc1), 3)))
     min_x <- min(results$truth)
@@ -475,18 +475,22 @@ dawnn_mses <- aggregate(results$dawnn_se, list(results$cell_type_and_upreg_pc1),
 daseq_mses <- aggregate(results$daseq_se, list(results$cell_type_and_upreg_pc1),
                        FUN = mean)
 
-p_meld <- plot_pc1_estimates(results, "meld", round(meld_mses$x, 5)) +
-          ggtitle("MELD")
-p_dawnn <- plot_pc1_estimates(results, "dawnn", round(dawnn_mses$x, 5)) +
-           ggtitle("Dawnn")
-p_daseq <- plot_pc1_estimates(results, "daseq", round(daseq_mses$x, 5)) +
-           ggtitle("DA-seq")
+p_meld <- plot_pc1_estimates(results, "meld", round(meld_mses$x, 5))
+ggsave(filename = "manuscript/images/mses_meld.png", plot = p_meld, dpi = 300,
+       units = "cm", width = 12, height = 10)
+p_dawnn <- plot_pc1_estimates(results, "dawnn", round(dawnn_mses$x, 5))
+ggsave(filename = "manuscript/images/mses_dawnn.png", plot = p_dawnn, dpi = 300,
+       units = "cm", width = 12, height = 10)
+p_daseq <- plot_pc1_estimates(results, "daseq", round(daseq_mses$x, 5))
+ggsave(filename = "manuscript/images/mses_daseq.png", plot = p_daseq, dpi = 300,
+       units = "cm", width = 12, height = 10)
 
 layout <- "
 #AA#
 BBCC
 "
-p_mses <- p_dawnn + p_meld + p_daseq + plot_layout(design = layout)
+p_mses <- (p_dawnn + ggtitle("Dawnn")) + (p_meld + ggtitle("MELD")) +
+          (p_daseq + ggtitle("DA-seq")) + plot_layout(design = layout)
 p_mses
 ggsave(filename = "manuscript/images/mse_comparisons.png", plot = p_mses,
        dpi = 300, units = "cm", width = 25, height = 20)
