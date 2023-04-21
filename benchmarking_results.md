@@ -99,6 +99,7 @@ plot_accuracy_results <- function(results) {
         geom_boxplot(aes(color = method), outlier.shape = NA) +
         geom_jitter(aes(color = method), size = 0.5, width = 0.2, alpha = 0.5) +
         geom_hline(aes(yintercept = hline, color = method), alpha = 0.75) +
+        scale_color_manual(values = c("#1E88E5", "#FFC107", "#D81B60")) +
         theme_bw() +
         theme(axis.text.x = element_text(angle = 45, hjust = 1),
               legend.position = "none", axis.title.y = element_blank(),
@@ -123,7 +124,8 @@ plot_accuracy_results_signif <- function(results) {
     results <- parse_results(results)
     bxp <- ggboxplot(results, x = "method", y = "value", color = "method",
                      add = "jitter", add.params = list(size = 0.2), size = 0.3,
-                     facet.by = c("stat", "upreg_lfc"))
+                     facet.by = c("stat", "upreg_lfc")) +
+           scale_color_manual(values = c("#1E88E5", "#FFC107", "#D81B60"))
 
     stat.test <- results %>%
                  group_by(stat, upreg_lfc) %>%
@@ -589,11 +591,11 @@ runtime_results$Method[runtime_results$Method == "dawnn"] <- "Dawnn"
 runtime_results$Method[runtime_results$Method == "milo"] <- "Milo"
 runtime_results$Method[runtime_results$Method == "daseq"] <- "DA-seq"
 runtime_results$Method <- factor(runtime_results$Method,
-                                 levels = c("Dawnn", "DA-seq", "Milo"))
+                                 levels = c("DA-seq", "Milo", "Dawnn"))
 
 runtime_plot <- ggplot(runtime_results, aes(x = n, y = t, color = Method)) +
                 geom_point() + xlab("Number of cells") + ylab("Time (secs)") +
-                scale_color_manual(values = c("#D81B60", "#1E88E5", "#FFC107")) +
+                scale_color_manual(values = c("#1E88E5", "#FFC107", "#D81B60")) +
                 theme_classic() + theme(legend.title = element_blank())
 runtime_plot
 ```
