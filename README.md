@@ -27,6 +27,10 @@ benchmarking\_code\_and\_results | • collect\_results\_all\_sim\_dat.R - Code 
 All code and results are copyright University College London (2023-).
 Everything is licensed under the GNU General Public License v3:
 
+<details>
+
+<summary>Click to reveal license</summary>
+
 GNU General Public License
 ==========================
 
@@ -622,4 +626,4 @@ more useful to permit linking proprietary applications with the library. If this
 what you want to do, use the GNU Lesser General Public License instead of this
 License. But first, please read
 &lt;<http://www.gnu.org/philosophy/why-not-lgpl.html>&gt;.
-
+</details>
