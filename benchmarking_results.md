@@ -1,23 +1,19 @@
 ---
 title: "Analysis for 'Dawnn: single-cell differential abundance with neural networks'"
 author: "George T. Hall"
-date: "Compiled on 21 April 2023"
+date: "Compiled on 10 July 2026"
 output:
     html_document:
-        toc: true
-        toc_depth: 2
-        toc_float:
-            collapsed: false
-        number_sections: true
+        toc: false
         code_folding: none
         keep_md: yes
 ---
 
-<!---
+<!--
 (C) University College London 2023. This software is licenced under the terms
 of the GNU GENERAL PUBLIC LICENSE Version 3. See COPYING.txt for the licence
 details.
---->
+-->
 
 
 
@@ -32,10 +28,13 @@ me know at `george.hall@ucl.ac.uk`.
 ```r
 library(tidyverse)
 library(ggplot2)
+library(scales)
 library(plotly)
 library(ggpubr)
 library(patchwork)
 library(rstatix)
+f <- glue::glue
+set.seed(123)
 ```
 
 # Benchmarking TPR and FDR
@@ -49,9 +48,16 @@ reveal the code.
 
 ```r
 read_results <- function(out_file_name) {
-    results <- read.csv(out_file_name, header = FALSE)
-    colnames(results) <- c("method", "family", "tpr", "fpr", "fdr", "time",
-                           "upreg_pc1", "upreg_pop", "rep")
+    results <- read.csv(out_file_name, header = FALSE, sep = "\t")
+    if (substr(basename(dirname(out_file_name)), 1, 3) == "sim") {
+        colnames(results) <- c("method", "family", "tpr_pda", "fpr_pda", "fdr_pda",
+                               "tpr_ada", "fpr_ada", "fdr_ada", "upreg_pc1",
+                               "upreg_pop", "rep")
+    } else {
+        colnames(results) <- c("method", "family", "tpr_pda", "fpr_pda", "fdr_pda",
+                               "tpr_ada", "fpr_ada", "fdr_ada", "upreg_pc1",
+                               "upreg_pop", "rep")
+    }
 
     return(results)
 }
@@ -62,26 +68,28 @@ read_results <- function(out_file_name) {
 <summary>`parse_results` Parse results dataframe</summary>
 
 ```r
-parse_results <- function(results) {
-    results <- tidyr::pivot_longer(results, 3:5, names_to = "stat")
+parse_results <- function(results, da_mode) {
+    stats_cols <- paste0(c("tpr_", "fpr_", "fdr_"), da_mode)
+    to_drop <- paste0(c("tpr_", "fpr_", "fdr_"),
+                      ifelse(da_mode == "pda", "ada", "pda"))
+    results <- select(results, -one_of(to_drop)) %>%
+                tidyr::pivot_longer(cols = stats_cols, names_to = "stat")
     results$hline <- 0
-    results[results$stat == "tpr", ]$hline <- 10 # Deliberately outside of graph
-    results[results$stat == "fdr", ]$hline <- 0.1
+    results[results$stat == paste0("tpr_", da_mode), ]$hline <- 10 # Deliberately outside of graph
+    results[results$stat == paste0("fdr_", da_mode), ]$hline <- 0.1
     results$method <- factor(results$method,
-                             levels = c("daseq", "milo", "dawnn"),
-                             labels = c("DA-seq", "Milo", "Dawnn"))
-    results$stat <- factor(results$stat, levels = c("tpr", "fpr", "fdr"),
-                           labels = c("True Positive Rate",
-                                      "False Positive Rate",
-                                      "False Discovery Rate"))
+                             levels = c("daseq", "cna", "milo", "dawnn_pda", "dawnn_ada"),
+                             labels = c("DA-seq", "CNA", "Milo", "Dawnn-G", "Dawnn-L"))
+    results$stat <- factor(results$stat,
+                           levels = stats_cols,
+                           labels = c("TPR", "FPR", "FDR"))
     # Milo paper used natural logarithm here (i.e. log()), but I think log2 is
     # more natural (e.g. more common with DE analysis).
     lfcs <- log2(results$upreg_pc1 / (1 - results$upreg_pc1))
     results$upreg_lfc <- as.factor(round(lfcs, 1))
 
-    results <- subset(results, subset = stat %in% c("True Positive Rate",
-                                                    "False Discovery Rate"))
-    results <- results %>% arrange(upreg_pop, rep)
+    results <- subset(results, subset = stat %in% c("TPR", "FDR"))
+    #results <- results %>% arrange(upreg_pop, rep)
 
     return(results)
 }
@@ -92,20 +100,71 @@ parse_results <- function(results) {
 <summary>`plot_accuracy_results` Plot accuracy results</summary>
 
 ```r
-plot_accuracy_results <- function(results) {
-    results <- parse_results(results)
+da_mode_prettifier <- function(da_mode) {
+    return(ifelse(da_mode == "pda", "GDA", "LDA"))
+}
 
-    p <- ggplot(results, aes(x = upreg_lfc, y = value)) +
-        geom_boxplot(aes(color = method), outlier.shape = NA) +
-        geom_jitter(aes(color = method), size = 0.5, width = 0.2, alpha = 0.5) +
+plot_accuracy_results <- function(results, da_mode, split_by_rarity = FALSE) {
+    # Are we constructing the legend?
+    main_plot <- nrow(results) > 1
+
+    plot_list <- list()
+    parsed <- parse_results(results, da_mode)
+    if (!main_plot) {
+        parsed <- head(parsed, 1)
+    }
+
+    da_mode_pretty <- da_mode_prettifier(da_mode)
+    facet_labels <- labeller(stat = c(TPR = paste0("TPR (", da_mode_pretty, ")"),
+                                      FDR = paste0("FDR (", da_mode_pretty, ")")))
+    shape <- 21
+    size <- ifelse(main_plot, 0.2, 5)
+    width <- ifelse(main_plot, 0.2, 0)
+    p <- ggplot(parsed, aes(x = upreg_lfc, y = value)) +
+        geom_boxplot(aes(color = method), outlier.shape = NA,
+                     linewidth = 0.3, alpha = 0.5) +
         geom_hline(aes(yintercept = hline, color = method), alpha = 0.75) +
-        scale_color_manual(values = c("#1E88E5", "#FFC107", "#D81B60")) +
+        geom_jitter(data = subset(parsed, rare_celltype == "Rare"),
+                    aes(color = method),
+                    fill = "white", shape = shape, stroke = 0.1, size = size,
+                    width = width) +
+        geom_jitter(data = subset(parsed, rare_celltype == "Common"),
+                    aes(fill = method),
+                    color = "white", shape = shape, stroke = NA, size = 2 * size,
+                    width = width) +
+        scale_color_manual(values = METHOD_COLS) +
+        scale_fill_manual(values = METHOD_COLS) +
         theme_bw() +
-        theme(axis.text.x = element_text(angle = 45, hjust = 1),
-              legend.position = "none", axis.title.y = element_blank(),
-              strip.background = element_blank()) +
-        xlab(bquote(Maximum~log[2] * `-fold` ~ change)) + ylim(0, 1) +
-        facet_grid(cols = vars(method), rows = vars(stat))
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+              axis.title.x = element_text(size = 7),
+              axis.text = element_text(size = 6),
+              axis.title.y = element_blank(),
+              strip.background = element_blank(),
+              strip.text = element_text(size = 8),
+              legend.position = "none") +
+        xlab(bquote(Maximum~log[2] * `-fold` ~ change))
+
+    if (main_plot) {
+        p <- p + scale_y_continuous(breaks = c(0, 0.5, 1), limits = c(0, 1))
+    } else {
+        return(p)
+    }
+
+    if (split_by_rarity) {
+        p <- p + facet_grid(rows = vars(rare_celltype, stat),
+                            cols = vars(method),
+                            labeller = facet_labels) +
+        theme(legend.position = "none")
+    } else {
+        p <- p + facet_grid(cols = vars(method),
+                            rows = vars(stat),
+                            labeller = facet_labels)
+    }
+
+    plot_list[[da_mode]] <- p
+
+    p <- ggarrange(plotlist = plot_list, nrow = 1,
+                   legend = FALSE, common.legend = FALSE)
 
     return(p)
 }
@@ -116,58 +175,94 @@ plot_accuracy_results <- function(results) {
 <summary>`plot_accuracy_results_signif` Plot accuracy results with statistics</summary>
 
 ```r
-plot_accuracy_results_signif <- function(results) {
+plot_accuracy_results_signif <- function(results, da_mode, tpr_fdr) {
+    # If all FDRs are 0 then all differences become 0, which causes problems
+    # with the statistical test. We therefore artificially increase the fdrs of
+    # 0 for each method by a very small amount to introduce a non-zero
+    # difference. This increase is not reflected in the plots.
+    for (i in seq_along(unique(results$method))) {
+        m <- unique(results$method)[i]
+        if (nrow(results[(results$fdr == 0) & (results$method == m), ]) > 0) {
+            results[(results$fdr == 0) & (results$method == m), ]$fdr <- (i / 10**9)
+        }
 
-    # Built following
-    # www.datanovia.com/en/blog/how-to-add-p-values-to-ggplot-facets
-
-    results <- parse_results(results)
-    bxp <- ggboxplot(results, x = "method", y = "value", color = "method",
-                     add = "jitter", add.params = list(size = 0.2), size = 0.3,
-                     facet.by = c("stat", "upreg_lfc")) +
-           scale_color_manual(values = c("#1E88E5", "#FFC107", "#D81B60"))
-
-    stat.test <- results %>%
-                 group_by(stat, upreg_lfc) %>%
-                 wilcox_test(value ~ method, p.adjust.method = "bonferroni",
-                             exact = TRUE, paired = TRUE) %>%
-                 add_xy_position(x = "method", dodge = 0.8)
-
-    eff_size <- results %>%
-                group_by(stat, upreg_lfc) %>%
-                wilcox_effsize(value ~ method, exact = TRUE, paired = TRUE)
-    stat.test.detailed <- results %>%
-                          group_by(stat, upreg_lfc) %>%
-                          wilcox_test(value ~ method, p.adjust.method =
-                                      "bonferroni", exact = TRUE, paired =
-                                      TRUE, detailed = TRUE) %>%
-                          add_xy_position(x = "method", dodge = 0.8)
-
-    eff_size_symbol <- ifelse(stat.test.detailed$estimate < 0, "<", ">")
-    eff_size_vect <- c()
-    for (i in seq_along(eff_size$effsize)) {
-        eff_size_vect <- c(eff_size_vect,
-                           paste0(rep(eff_size_symbol[i],
-                                      round(4 * eff_size$effsize[i]) + 1),
-                                  collapse = ""))
+        if (nrow(results[(results$tpr == 1) & (results$method == m), ]) > 0) {
+            results[(results$tpr == 1) & (results$method == m), ]$tpr <- 1 - (i / 10**9)
+        }
     }
-    stat.test$eff_size <- eff_size_vect
 
-    stat.test$y.position <- rep(c(1.120, 1.300, 1.480), 12)
-    stat.test$y.position.effect_size <- rep(c(1.170, 1.350, 1.530), 12)
+    parsed <- parse_results(results, da_mode)
+    results_wide <- parsed %>%
+                        filter(stat == tpr_fdr) %>%
+                        select(c(method, upreg_lfc, upreg_pop, dataset, rep, value)) %>%
+                        mutate(pair_id = paste(upreg_lfc, upreg_pop, dataset, rep,
+                                               sep = "_")) %>%
+                        select(pair_id, method, value) %>%
+                        pivot_wider(names_from = method, values_from = value)
 
-    p <- bxp +
-         stat_pvalue_manual(stat.test, label = "p.adj.signif",
-                            tip.length = 0.01, hide.ns = FALSE) +
-         stat_pvalue_manual(stat.test, label = "eff_size",
-                            tip.length = 0.01, hide.ns = TRUE,
-                            y.position = "y.position.effect_size",
-                            remove.bracket = TRUE) +
-         scale_y_continuous(breaks = seq(0, 1, 0.2),
-                            expand = expansion(mult = c(0.01, 0.1))) &
-         theme(axis.text.x = element_text(angle = 45, hjust = 1),
-               legend.position = "none", axis.title = element_blank(),
-               strip.background = element_blank())
+    method_pairs <- combn(unique(parsed$method), 2, simplify = FALSE)
+
+    stat_test <- lapply(method_pairs, function(pair) {
+      method_1 <- pair[1]
+      method_2 <- pair[2]
+
+      # Keep only rows where both methods have a value (complete pairs)
+      d <- results_wide %>%
+            select(pair_id, all_of(c(method_1, method_2)))
+
+      test <- wilcox.test(x = d[[method_1]], y = d[[method_2]], paired = TRUE,
+                          exact = TRUE, conf.int = TRUE)
+
+      tab <- tibble(method_1 = method_1, method_2 = method_2,
+                    n_pairs = nrow(d), statistic = test$statistic,
+                    estimate = test$estimate, p.value = test$p.value)
+      return(tab)
+    }) %>%
+        do.call(rbind, .)
+
+    stat_test_rev <- stat_test
+    stat_test_rev$tmp <- stat_test_rev$method_1
+    stat_test_rev$method_1 <- stat_test_rev$method_2
+    stat_test_rev$method_2 <- stat_test_rev$tmp
+    stat_test_rev$tmp <- NULL
+    stat_test_rev$estimate <- -1 * stat_test_rev$estimate
+
+    df <- rbind(stat_test, stat_test_rev) %>%
+            select(c("method_1", "method_2", "p.value", "estimate")) %>%
+            mutate(p.adj = p.adjust(p.value, method = "bonferroni"))
+
+    if (tpr_fdr == "FDR") {
+        # Reverse sign of estimate as we want FDR to be minimized
+        df$estimate <- -1 * df$estimate
+    }
+
+    df$estimate[df$p.adj > 0.05] <- NA
+
+    da_mode_pretty <- da_mode_prettifier(da_mode)
+    plot_title <- paste0("Comparison of ", tpr_fdr, " (", da_mode_pretty, ")")
+    method_1_color <- "blue"
+    method_2_color <- "red"
+    not_signif_color <- "gray"
+    p <- ggplot(df, aes(x = method_1, y = method_2, fill = estimate)) +
+            geom_tile() +
+            scale_fill_gradientn(colors = c(method_2_color, not_signif_color,
+                                            method_1_color),
+                                 na.value = not_signif_color,
+                                 limits = c(-1, 1),
+                                 breaks = c(-0.85, 0, 0.85),
+                                 labels = c("Method 2", "Neither",
+                                            "Method 1")) +
+            guides(fill = guide_colorbar(ticks.colour = NA,
+                                         label.theme = element_text(hjust = 0.5))) +
+            geom_text(data = df[df$p.adj > 0.05, ], aes(x = method_1, y = method_2), label = "ns") +
+            labs(title = plot_title, x = "Method 1", y = "Method 2",
+                 fill = "Best method") +
+            theme_bw() +
+            theme(panel.grid = element_blank(), aspect.ratio = 1,
+                  axis.title.x = element_text(color = method_1_color),
+                  axis.title.y = element_text(color = method_2_color),
+                  axis.text.x = element_text(angle = 45, hjust = 1),
+                  plot.title = element_text(hjust = 0.5))
 
     return(p)
 }
@@ -183,8 +278,8 @@ ggsave_plots <- function(non_stat_plot, stat_plot, file_name) {
            plot = non_stat_plot, dpi = 300, units = "cm", width = 12,
            height = 10)
     ggsave(filename = paste0(file_name, "_stat.png", collapse = ""),
-           plot = stat_plot, dpi = 300, units = "cm", width = 12,
-           height = 10)
+           plot = stat_plot, dpi = 300, units = "cm", width = 24,
+           height = 14)
 }
 ```
 </details>
@@ -194,173 +289,158 @@ ggsave_plots <- function(non_stat_plot, stat_plot, file_name) {
 We now plot the accuracy results (with and without tests for statistical
 significance) for each benchmarking dataset.
 
-## Simulated discrete clusters
-
 
 ```r
 # Generated as in data_for_benchmarking_results/collect_results_all_sim_dat.R
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_discrete_clusters_rerun.csv")
-(p_disc_clusts_acc <- plot_accuracy_results(results))
+results_prefix <- "benchmarking_rerun_2025/results/"
+images_prefix <- "manuscript/images_2025/"
+samples <- c("sim_discrete_clusters", "sim_linear_traj", "sim_branch_traj",
+             "mouse_embryo", "skin", "organoid", "heart")
+# Set to 0 for fully simulated structures as there are no clusters with below
+# 8% abundance
+rare_pop_cutoff <- list("sim_discrete_clusters" = 0.05, "sim_linear_traj" = 0.05,
+                        "sim_branch_traj" = 0.05, "skin" = 0.05,
+                        "mouse_embryo" = 0.05, "organoid" = 0.05,
+                        "heart" = 0.05)
+upreg_pops_proportions <- read.csv("upreg_pops_proportions.csv")
+
+METHOD_COLS <- c("DA-seq" = "#1E88E5", "CNA" = "#004D40", "Milo" = "#FFC107",
+                 "Dawnn-G" = "#D81B60", "Dawnn-L" = "#000000")
+
+all_results <- data.frame("method" = character(), "family" = character(),
+                          "tpr_pda" = numeric(), "fpr_pda" = numeric(),
+                          "fdr_pda" = numeric(), "tpr_ada" = numeric(),
+                          "fpr_ada" = numeric(), "fdr_ada" = numeric(),
+                          "upreg_pc1" = numeric(), "upreg_pop" = numeric(),
+                          "rep" = numeric(), rare_celltype = character(),
+                          "dataset" = character())
+plot_list_accs <- list("pda" = list(), "ada" = list())
+LEGEND_COLS <- sapply(METHOD_COLS, function(x) {"grey"})
+for (s in samples) {
+    results <- read_results(paste0(results_prefix, s, "/all_methods.csv"))
+    pop_prop_df <- subset(upreg_pops_proportions, sample == s)
+    rare_celltypes <- subset(pop_prop_df, proportion <= rare_pop_cutoff[[s]])
+    rare_celltypes <- rare_celltypes$population
+    results$rare_celltype <- ifelse(results$upreg_pop %in% rare_celltypes,
+                                    "Rare", "Common")
+    results$dataset <- s
+    all_results <- rbind(all_results, results)
+    for (split_by_rarity in c(TRUE, FALSE)) {
+        for (da_mode in c("pda", "ada")) {
+            p_acc <- plot_accuracy_results(results, da_mode, split_by_rarity)
+            print(p_acc)
+            if (!split_by_rarity) {
+                plot_list_accs[[da_mode]][[s]] <- p_acc
+            }
+            suffix_extended <- paste0(ifelse(split_by_rarity, "_split_rarity_", "_"),
+                                      da_mode)
+            ggsave(filename = paste0(images_prefix, s, suffix_extended, ".pdf",
+                                     collapse = ""),
+                   plot = p_acc, dpi = 300, units = "cm",
+                   width = ifelse(split_by_rarity, 12, 10),
+                   height = ifelse(split_by_rarity, 8, 5))
+        }
+    }
+
+    # Create legend
+    pl_leg <- list()
+    for (cr in c("Common", "Rare")) {
+        for_legend <- subset(results, (rare_celltype == cr)) %>% head(1)
+        if (nrow(for_legend) > 0) {
+            p <- plot_accuracy_results(for_legend, da_mode, FALSE)
+            p$layers[[1]] <- NULL
+            p$layers[[1]] <- NULL
+            p <- p + theme_void() + theme(legend.position = "none")
+            p$layers[[1]]$aes_params$size <- 5
+            p$layers[[2]]$aes_params$size <- 7
+            p$layers[[1]]$aes_params$stroke <- 2
+            p <- p +
+                    scale_color_manual(values = LEGEND_COLS) +
+                    scale_fill_manual(values = LEGEND_COLS) +
+                    annotate("text", label = cr, x = -Inf, y = -Inf, vjust = 2.3,
+                             hjust = ifelse(cr == "Common", -0.4, -1.3)) +
+                    scale_y_continuous(expand=c(0, 0))
+            pl_leg[[cr]] <- p
+        }
+    }
+    p_leg <- ggarrange(plotlist = pl_leg, nrow = 1)
+    ggsave(filename = paste0(images_prefix, "tpr_fdr_legend.pdf"), plot = p_leg,
+           dpi = 300, units = "cm", width = 6, height = 1.5)
+
+    results <- mutate(results, method = case_when(method == "milo" ~ "Milo",
+                              method == "daseq" ~ "DA-seq",
+                              method == "dawnn_pda" ~ "Dawnn-G",
+                              method == "dawnn_ada" ~ "Dawnn-L",
+                              method == "cna" ~ "CNA"))
+    default_color <- "black"
+    results_idxs <- match(results$upreg_pop, pop_prop_df$population)
+    results$upreg_prop <- pop_prop_df[results_idxs, "proportion"]
+    results$method <- factor(results$method,
+                             levels = c("DA-seq", "CNA", "Milo", "Dawnn-G",
+                                        "Dawnn-L"))
+    plot_list <- list()
+    results <- subset(results, method != "CNA")
+    for (statistic in c("tpr", "fdr")) {
+        for (da_type in c("ada", "pda")) {
+            colname <- paste0(statistic, "_", da_type)
+            p <- ggplot(results, aes(x = upreg_prop, y = .data[[colname]], color = method)) +
+                    geom_jitter(aes(shape = method), size = 0.75, width = 0.001, stroke = 0.25,
+                                alpha = 0.5) +
+                    geom_vline(xintercept=0.05, color="#ADADAD",linetype="dashed") +
+                    scale_shape_manual(values=c("DA-seq" = 4, "CNA" = 0, "Milo" = 2,
+                                                "Dawnn-G" = 16, "Dawnn-L" = 16)) +
+                    scale_color_manual(values=c("DA-seq" = default_color, "CNA" = default_color,
+                                                "Milo" = default_color,
+                                                "Dawnn-G" = "blue",
+                                                "Dawnn-L" = "red")) +
+                    scale_x_continuous(breaks=scales::pretty_breaks()) +
+                    guides(shape = guide_legend(override.aes = list(size = 2))) +
+                    xlab("Proportion of cells in upregulated population") +
+                    ylab(paste(ifelse(statistic == "tpr", "TPR", "FDR"),
+                         ifelse(da_type == "pda","(global DA)", "(local DA)"))) +
+                    ylim(0, 1) +
+                    theme_bw()
+            if (statistic == "fdr") {
+                p <- p + geom_hline(yintercept=0.1,color="#ADADAD")
+            }
+            plot_list[[colname]] <- p
+        }
+    }
+    p <- ggarrange(plotlist = plot_list, common.legend = TRUE, legend = "bottom")
+    print(p)
+    f_name <- paste0(images_prefix, s, "_no_cna_rare_common.pdf",
+                     collapse = "")
+    ggsave(filename = f_name, plot = p, dpi = 300, units = "cm", width = 20,
+           height = 15)
+}
 ```
 
-<img src="benchmarking_results_files/figure-html/discrete_clusters_acc-1.png" style="display: block; margin: auto;" />
+<img src="benchmarking_results_files/figure-html/make_results_plots-1.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-2.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-3.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-4.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-5.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-6.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-7.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-8.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-9.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-10.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-11.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-12.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-13.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-14.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-15.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-16.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-17.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-18.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-19.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-20.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-21.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-22.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-23.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-24.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-25.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-26.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-27.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-28.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-29.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-30.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-31.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-32.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-33.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-34.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-35.png" style="display: block; margin: auto;" />
 
 ```r
-(p_disc_clusts_acc_stats <- plot_accuracy_results_signif(results))
+plot_list <- list()
+for (tpr_fdr in c("TPR", "FDR")) {
+    for (da_mode in c("pda", "ada")) {
+        p_name <- paste0(tpr_fdr, "_", da_mode)
+        p <- plot_accuracy_results_signif(all_results, da_mode, tpr_fdr)
+        print(p)
+        plot_list[[p_name]] <- p
+    }
+}
 ```
 
-<img src="benchmarking_results_files/figure-html/discrete_clusters_acc-2.png" style="display: block; margin: auto;" />
+<img src="benchmarking_results_files/figure-html/make_results_plots-36.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-37.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-38.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/make_results_plots-39.png" style="display: block; margin: auto;" />
 
 ```r
-ggsave_plots(p_disc_clusts_acc, p_disc_clusts_acc_stats,
-             "manuscript/images/sim_discrete_clusters_benchmarking")
+p <- ggarrange(plotlist = plot_list, common.legend = TRUE, legend = "right")
+print(p)
 ```
 
-## Simulated linear trajectory
-
-
-```r
-# Generated as in data_for_benchmarking_results/collect_results_all_sim_dat.R
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_linear_traj_rerun.csv")
-(p_linear_traj_acc <- plot_accuracy_results(results))
-```
-
-<img src="benchmarking_results_files/figure-html/linear_traj_acc-1.png" style="display: block; margin: auto;" />
+<img src="benchmarking_results_files/figure-html/make_results_plots-40.png" style="display: block; margin: auto;" />
 
 ```r
-(p_linear_traj_acc_stats <- plot_accuracy_results_signif(results))
-```
-
-<img src="benchmarking_results_files/figure-html/linear_traj_acc-2.png" style="display: block; margin: auto;" />
-
-```r
-ggsave_plots(p_linear_traj_acc, p_linear_traj_acc_stats,
-             "manuscript/images/sim_linear_traj_benchmarking")
-```
-
-## Simulated branching trajectory
-
-
-```r
-# Generated as in data_for_benchmarking_results/collect_results_all_sim_dat.R
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_branch_traj_rerun.csv")
-
-# The effect size code was crashing here since, at upreg_pc1 = 0.7, both Milo
-# and Dawnn had only fdrs of 0, which led to all differences being 0. So below
-# I artificially increase one fdr datapoint for each method by 0.00000000001,
-# to introduce a non-zero difference. This increase is not reflected in the
-# plots.
-
-milo_upreg_pc1_07_idxs <- intersect(which(results$upreg_pc1 == 0.7),
-                                    which(results$method == "milo"))
-results[milo_upreg_pc1_07_idxs[1], ]$fdr <- 0.00000000001
-daseq_upreg_pc1_07_idxs <- intersect(which(results$upreg_pc1 == 0.7),
-                                     which(results$method == "daseq"))
-results[daseq_upreg_pc1_07_idxs[2], ]$fdr <- 0.00000000001
-
-(p_branch_traj_acc <- plot_accuracy_results(results))
-```
-
-<img src="benchmarking_results_files/figure-html/branch_traj_acc-1.png" style="display: block; margin: auto;" />
-
-```r
-(p_branch_traj_acc_stats <- plot_accuracy_results_signif(results))
-```
-
-<img src="benchmarking_results_files/figure-html/branch_traj_acc-2.png" style="display: block; margin: auto;" />
-
-```r
-ggsave_plots(p_branch_traj_acc, p_branch_traj_acc_stats,
-             "manuscript/images/sim_branching_traj_benchmarking")
-```
-
-## Mouse gastrulation dataset
-
-
-```r
-# Generated as in data_for_benchmarking_results/collecting_results_mouse.sh
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_mouse_regen.csv")
-(p_mouse_acc <- plot_accuracy_results(results))
-```
-
-<img src="benchmarking_results_files/figure-html/mouse_acc-1.png" style="display: block; margin: auto;" />
-
-```r
-(p_mouse_acc_stats <- plot_accuracy_results_signif(results))
-```
-
-<img src="benchmarking_results_files/figure-html/mouse_acc-2.png" style="display: block; margin: auto;" />
-
-```r
-ggsave_plots(p_mouse_acc, p_mouse_acc_stats,
-             "manuscript/images/mouse_gastrulation_benchmarking")
-```
-
-## Skin dataset
-
-
-```r
-# Generated as in data_for_benchmarking_results/collecting_results_skin.sh
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_skin_regen.csv")
-(p_skin_acc <- plot_accuracy_results(results))
-```
-
-<img src="benchmarking_results_files/figure-html/skin_acc-1.png" style="display: block; margin: auto;" />
-
-```r
-(p_skin_acc_stats <- plot_accuracy_results_signif(results))
-```
-
-<img src="benchmarking_results_files/figure-html/skin_acc-2.png" style="display: block; margin: auto;" />
-
-```r
-ggsave_plots(p_skin_acc, p_skin_acc_stats,
-             "manuscript/images/keratinocyte_benchmarking")
-```
-
-## Organoid dataset
-
-
-```r
-# Generated as in data_for_benchmarking_results/collecting_results_organoid.sh
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_organoid_regen.csv")
-(p_organoid_acc <- plot_accuracy_results(results))
-```
-
-<img src="benchmarking_results_files/figure-html/organoid_acc-1.png" style="display: block; margin: auto;" />
-
-```r
-(p_organoid_acc_stats <- plot_accuracy_results_signif(results))
-```
-
-<img src="benchmarking_results_files/figure-html/organoid_acc-2.png" style="display: block; margin: auto;" />
-
-```r
-ggsave_plots(p_organoid_acc, p_organoid_acc_stats,
-             "manuscript/images/bile_duct_organoids_benchmarking")
-```
-
-## Heart dataset
-
-
-```r
-# Generated as in data_for_benchmarking_results/collecting_results_heart.sh
-results <- read_results("data_for_benchmarking_results/tpr_fdr_results_heart_regen.csv")
-
-(p_heart_acc <- plot_accuracy_results(results))
-```
-
-<img src="benchmarking_results_files/figure-html/heart_acc-1.png" style="display: block; margin: auto;" />
-
-```r
-(p_heart_acc_stats <- plot_accuracy_results_signif(results))
-```
-
-<img src="benchmarking_results_files/figure-html/heart_acc-2.png" style="display: block; margin: auto;" />
-
-```r
-ggsave_plots(p_heart_acc, p_heart_acc_stats,
-             "manuscript/images/heart_benchmarking")
+f_name <- paste0(images_prefix, "_tpr_fdr_stats_heatmap.pdf", collapse = "")
+ggsave(filename = f_name, plot = p, dpi = 300, units = "cm", width = 20, height = 15)
 ```
 
 # Recovering liver cirrhosis findings
@@ -399,6 +479,8 @@ create_beeswarm_plot <- function(res, expDA_df) {
       scale_y_continuous(breaks = scales::pretty_breaks(n = 14)) +
       xlab(group.by) + ylab("Log Fold Change") +
       ggbeeswarm::geom_quasirandom(alpha = 1, size = 0.2) +
+      geom_violin(linewidth = NA, scale = "width", bw = 0.2, fill = "#D7D7D7",
+                  alpha = 0.5) +
       coord_flip() +
       facet_grid(annotation_lineage~., scales = "free", space = "free") +
       theme_bw(base_size = 22) +
@@ -407,38 +489,67 @@ create_beeswarm_plot <- function(res, expDA_df) {
             plot.margin = margin(t = 0, b = 0, l = 0, r = 0, unit = "pt")) +
       ylim(-6.5, 6.5)
 }
+
+create_beeswarm_plot_ct_abundance <- function(res, expDA_df, x_col) {
+    method_names <- unique(res$method)
+    pt_sizes <- rep(1, length(method_names))
+    names(pt_sizes) <- method_names
+    pt_sizes["milo"] <- ifelse("author_cell_type", 2, 1)
+
+    p <- res %>%
+      mutate(logFC_color = ifelse(is_da == 1, lfc, NA)) %>%
+      ggplot(aes(y = lfc, x = .data[[x_col]], color = logFC_color)) +
+      scale_color_gradient2() +
+      scale_size_manual(values = pt_sizes) +
+      guides(color = "none") +
+      scale_x_discrete(drop = FALSE) +
+      scale_y_continuous(breaks = scales::pretty_breaks(n = 7)) +
+      ggbeeswarm::geom_quasirandom(size = 0.3, stroke = 0, varwidth = TRUE) +
+      geom_violin(linewidth = NA, scale = "width", bw = 0.2, fill = "#D7D7D7",
+                  alpha = 0.5) +
+      coord_flip() +
+      theme_bw(base_size = 22)
+  return(p)
+}
 ```
 
 
 ```r
 # Results generated by "benchmarking_liver_cirrhosis_analysis.R".
-liver_cirrhosis_results <- read.csv("data_for_benchmarking_results/liver_cirrhosis_results_rerun.csv")
-milo_cirrhosis_df <- subset(liver_cirrhosis_results, method == "milo")
-daseq_cirrhosis_df <- subset(liver_cirrhosis_results, method == "daseq")
-dawnn_cirrhosis_df <- subset(liver_cirrhosis_results, method == "dawnn")
+liver_cirrhosis_results <- read.csv("liver_analysis_regen/liver_cirrhosis_results_rerun.csv")
+ct_nums <- read.csv("liver_analysis_regen/cell_type_abundances.csv")
+ct_idxs <- match(liver_cirrhosis_results$annotation_indepth, ct_nums$Var1)
+liver_cirrhosis_results$ct_num <- ct_nums[ct_idxs, "Freq"]
+liver_cirrhosis_results$ct_prop <- liver_cirrhosis_results$ct_num / sum(ct_nums$Freq)
 
-# Subset out only the cell types also caught by Milo
-cell_types_in_milo <- unique(milo_cirrhosis_df$annotation_indepth)
-daseq_cirrhosis_df <- subset(daseq_cirrhosis_df,
-                             annotation_indepth %in% cell_types_in_milo)
-dawnn_cirrhosis_df <- subset(dawnn_cirrhosis_df,
-                             annotation_indepth %in% cell_types_in_milo)
+bio_results <- list()
+bio_results[["cirrhosis"]] <- liver_cirrhosis_results
 
-# Generate Milo plot
-p_milo <- create_beeswarm_plot(milo_cirrhosis_df, expDA_df)
-p_milo <- p_milo + theme(strip.text.y = element_blank(),
-                         axis.title.x = element_blank()) + ggtitle("Milo")
+cirrhosis_dfs <- list()
+cirrhosis_methods <- c("milo", "daseq", "dawnn_pda", "dawnn_ada")
 
-# Generate DAseq plot
-p_daseq <- create_beeswarm_plot(daseq_cirrhosis_df, expDA_df)
-p_daseq <- p_daseq + theme(strip.text.y = element_blank()) + ggtitle("DA-seq")
+for (method in cirrhosis_methods) {
+    cirrhosis_dfs[[method]] <- liver_cirrhosis_results[liver_cirrhosis_results$method == method, ]
+}
 
-# Generate Dawnn plot
-p_dawnn <- create_beeswarm_plot(dawnn_cirrhosis_df, expDA_df)
-p_dawnn <- p_dawnn + theme(strip.text.y = element_text(angle = 0),
-                           axis.title.x = element_blank()) + ggtitle("Dawnn")
+# Subset only the cell types also caught by Milo
+cell_types_in_milo <- unique(cirrhosis_dfs[["milo"]]$annotation_indepth)
+for (method in cirrhosis_methods[cirrhosis_methods != "milo"]) {
+    cirrhosis_dfs[[method]] <- subset(cirrhosis_dfs[[method]],
+                                      annotation_indepth %in% cell_types_in_milo)
+}
 
-lhs <- dawnn_cirrhosis_df %>%
+pretty_title <- c("milo" = "Milo", "daseq" = "DA-seq", "dawnn_pda" = "Dawnn-G",
+                  "dawnn_ada" = "Dawnn-L")
+plot_list <- list()
+for (method in cirrhosis_methods) {
+    plot_list[[method]] <- create_beeswarm_plot(cirrhosis_dfs[[method]], expDA_df) +
+                            theme(strip.text.y = element_blank(),
+                                  axis.title.x = element_blank()) +
+                            ggtitle(pretty_title[method])
+}
+
+lhs <- cirrhosis_dfs[["dawnn_pda"]] %>%
   left_join(expDA_df) %>%
   group_by(annotation_indepth) %>%
   summarise(pred_DA = dplyr::first(pred_DA),
@@ -466,149 +577,421 @@ lhs <- dawnn_cirrhosis_df %>%
         axis.title.x = element_blank(), axis.text.x = element_blank(),
         axis.ticks.x = element_blank(), legend.position = "bottom")
 
-p_all_beeswarms <- lhs + p_milo + p_daseq + p_dawnn +
-     plot_layout(widths = c(1, 10, 10, 10), guides = "collect") &
-     theme(legend.position = "bottom", legend.justification = 0,
-           plot.title = element_text(hjust = 0.5))
-p_all_beeswarms
+lhs_legend <- as_ggplot(get_legend(lhs))
+lhs <- lhs + theme(legend.position = "none")
+
+p_all_beeswarms <- lhs + plot_list[["milo"]] + plot_list[["daseq"]] +
+                    plot_list[["dawnn_pda"]] + plot_list[["dawnn_ada"]] +
+                    plot_layout(widths = c(1, 10, 10, 10, 10)) &
+                    theme(legend.position = "none",
+                          plot.title = element_text(hjust = 0.5))
+lfc_legend <- ggplot() +
+                annotate("text", size = 8, label = "Log-fold change", x = 0,
+                         y = 0) +
+                theme_void()
+lfc_legend <- ggarrange(ggplot() + theme_void(), lfc_legend, nrow = 1, widths = c(1 , 13))
+p_all_beeswarms <- ggarrange(p_all_beeswarms,
+                             lfc_legend,
+                             lhs_legend, ncol = 1, heights = c(0.9, 0.03, 0.08))
+print(p_all_beeswarms)
 ```
 
 <img src="benchmarking_results_files/figure-html/generate_liver_beeswarms-1.png" style="display: block; margin: auto;" />
 
 ```r
-ggsave(filename = "manuscript/images/cirrhosis_all_methods_beeswarms.png",
-       plot = p_all_beeswarms, dpi = 300, units = "cm", width = 30, height = 40)
-```
+ggsave(filename = paste0(images_prefix, "cirrhosis_all_methods_beeswarms.png"),
+       plot = p_all_beeswarms, dpi = 300, units = "cm", width = 30, height = 40, bg="white")
 
-# P(Condition1) estimation accuracy
-
-To compare against MELD - which does not call cells as in regions of
-differential abundance - we again follow Dann _et al._ and compare the mean
-squared errors of their estimates of P(Condition1). We also do so for DA-seq.
-
-
-```r
-plot_pc1_estimates <- function(results, other_method, other_mses) {
-    mses_df <- data.frame(x = 0.8, y = 0.35, lab = other_mses,
-                          cell_type = factor(sort(rep(unique(results$cell_type), 3))),
-                          upreg_pc1 = factor(rep(unique(results$upreg_pc1), 3)))
-    min_x <- min(results$truth)
-    max_x <- max(results$truth)
-    min_y <- min(c(results$meld, results$dawnn, results$daseq))
-    max_y <- max(c(results$meld, results$dawnn, results$daseq))
-
-    p <- ggplot(results, aes(x = truth, y = .data[[other_method]])) +
-            geom_point(size = 0, alpha = 0.03) +
-            xlab("Ground truth") + ylab("Estimated value") +
-            xlim(c(min_x, max_x)) + ylim(c(min_y, max_y)) +
-            geom_abline(intercept = 0, slope = 1, color = "red") +
-            geom_text(data = mses_df, aes(x = x, y = y, label = lab)) +
-            facet_grid(upreg_pc1 ~ cell_type) & theme_bw() &
-            theme(strip.background = element_blank(),
-                  plot.title = element_text(hjust = 0.5))
-
-    return(p)
+order_md_col <- function(md, prop_table, ct_col) {
+    md$ct_prop <- as.numeric(prop_table[md[, ct_col]])
+    ct_ordered <- md %>%
+                    select(ct_col, ct_prop) %>%
+                    distinct() %>%
+                    arrange(ct_prop) %>%
+                    na.omit() %>%
+                    mutate(combined = paste0(.data[[ct_col]], " [",
+                                             format(round(100 * ct_prop, 2),
+                                                    nsmall = 2),
+                                             "%]"))
+    md[, ct_col] <- factor(md[, ct_col], levels = ct_ordered[, ct_col],
+                           labels = ct_ordered$combined)
+    return(md)
 }
 
-meld_out <- data.frame(data.table::fread("data_for_benchmarking_results/meld_pc1_ests.csv",
-                                         header = FALSE))
-meld_out <- meld_out[((3 * (1:9)) - 2), ]
-meld_out <- cbind(meld_out, upreg_pc1 = c(rep(c(0.7, 0.8, 0.9), 3)))
-meld_out <- cbind(meld_out, cell_type = c(rep("Erythroid1", 3),
-                                          rep("Gut", 3),
-                                          rep("Somitic mesoderm", 3)))
-meld_out_vector <- as.numeric(c(t(as.matrix(meld_out[, 2:64019]))))
+# Now make bee swarms with cell type proportion on y axis
+plot_list <- list()
+prop_table <- prop.table(table(cirrhosis_dfs[["dawnn_ada"]]$annotation_indepth))
+for (method in cirrhosis_methods) {
+    cirrhosis_dfs[[method]] <- order_md_col(cirrhosis_dfs[[method]],
+                                            prop_table, "annotation_indepth")
+    plot_list[[method]] <- create_beeswarm_plot_ct_abundance(cirrhosis_dfs[[method]],
+                                                             expDA_df,
+                                                             "annotation_indepth") +
+                            theme(strip.text.y = element_blank(),
+                                  axis.title.y = element_blank()) +
+                            xlab("Log-fold change") +
+                            ggtitle(pretty_title[method])
+}
 
-dawnn_out <- data.frame(data.table::fread("data_for_benchmarking_results/dawnn_mse_benchmarking_regen_final_model_dawnn_rerun.csv",
-                                          header = FALSE))
-dawnn_out_vector <- as.numeric(c(t(as.matrix(dawnn_out[, 1:64018]))))
-
-daseq_out <- data.frame(data.table::fread("data_for_benchmarking_results/daseq_pc1_ests.csv",
-                                          header = FALSE))
-daseq_out_vector <- as.numeric(c(t(as.matrix(daseq_out[, 1:64018]))))
-
-ground_truth <- data.table::fread("data_for_benchmarking_results/pc1_ground_truth_regen.csv",
-                                  header = FALSE)
-ground_truth <- ground_truth[order(ground_truth$V2), ]
-ground_truth <- ground_truth[, 5:(4 + 64018)]
-ground_truth_vector <- as.numeric(c(as.matrix(t(ground_truth))))
-
-cell_type_vector <- c(sapply(meld_out$cell_type, function(x) {rep(x, 64018)}))
-upreg_pc1_vector <- c(sapply(meld_out$upreg_pc1, function(x) {rep(x, 64018)}))
-
-results <- data.frame(cell_name = rep(paste0("cell_", 1:64018), 9),
-                      truth = ground_truth_vector, meld = meld_out_vector,
-                      dawnn = dawnn_out_vector,
-                      daseq = daseq_out_vector,
-                      cell_type = cell_type_vector,
-                      upreg_pc1 = upreg_pc1_vector)
-
-results$meld_se <- (results$truth - results$meld)**2
-results$dawnn_se <- (results$truth - results$dawnn)**2
-results$daseq_se <- (results$truth - results$daseq)**2
-
-results$cell_type_and_upreg_pc1 <- paste(results$cell_type, results$upreg_pc1,
-                                         sep = "_")
-meld_mses <- aggregate(results$meld_se, list(results$cell_type_and_upreg_pc1),
-                       FUN = mean)
-dawnn_mses <- aggregate(results$dawnn_se, list(results$cell_type_and_upreg_pc1),
-                       FUN = mean)
-daseq_mses <- aggregate(results$daseq_se, list(results$cell_type_and_upreg_pc1),
-                       FUN = mean)
-
-p_meld <- plot_pc1_estimates(results, "meld", round(meld_mses$x, 5))
-ggsave(filename = "manuscript/images/mses_meld.png", plot = p_meld, dpi = 300,
-       units = "cm", width = 12, height = 10)
-p_dawnn <- plot_pc1_estimates(results, "dawnn", round(dawnn_mses$x, 5))
-ggsave(filename = "manuscript/images/mses_dawnn.png", plot = p_dawnn, dpi = 300,
-       units = "cm", width = 12, height = 10)
-p_daseq <- plot_pc1_estimates(results, "daseq", round(daseq_mses$x, 5))
-ggsave(filename = "manuscript/images/mses_daseq.png", plot = p_daseq, dpi = 300,
-       units = "cm", width = 12, height = 10)
-
-layout <- "
-#AA#
-BBCC
-"
-p_mses <- (p_dawnn + ggtitle("Dawnn")) + (p_meld + ggtitle("MELD")) +
-          (p_daseq + ggtitle("DA-seq")) + plot_layout(design = layout)
-p_mses
+p <- ggarrange(plotlist = plot_list, nrow = 1)
+print(p)
 ```
 
-<img src="benchmarking_results_files/figure-html/pc1_mses-1.png" style="display: block; margin: auto;" />
+<img src="benchmarking_results_files/figure-html/generate_liver_beeswarms-2.png" style="display: block; margin: auto;" />
 
 ```r
-ggsave(filename = "manuscript/images/mse_comparisons.png", plot = p_mses,
-       dpi = 300, units = "cm", width = 25, height = 20)
+ggsave(filename = paste0(images_prefix,
+                         "cirrhosis_all_methods_beeswarms_ct_abundance.png"),
+       plot = p, dpi = 300, units = "cm", width = 60, height = 30, bg="white")
+
+CELL_TYPES <- c("Terminal airway-enriched secretory cells", "Glial, Schwann cells",
+                "Endothelial cells, capillary, common",
+                "Endothelial cells, capillary, aerocyte-enriched", "Mast cells",
+                "CD8\\+ enriched T, common subtype",
+                "Ionocytes")
+PATTERN <- paste(CELL_TYPES, collapse = "|")
+
+# Now make beeswarms about biological impact
+iono_results <- read.csv("biological_impact/cf_cells_results.csv") %>%
+                    na.omit()
+# Remove malformed unicode
+iono_results$author_cell_type <- gsub("<U+00EF>", "i", fixed = TRUE,
+                                      iono_results$author_cell_type)
+prop_table <-  prop.table(table(iono_results$author_cell_type))
+iono_results <- order_md_col(iono_results, prop_table, "author_cell_type")
+bio_results[["iono"]] <- iono_results
+
+iono_dfs <- list()
+for (method in cirrhosis_methods) {
+    method_results <- iono_results[iono_results$method == method, ]
+    iono_dfs[[paste0(method, "_full")]] <- method_results
+    idxs <- grepl(PATTERN, method_results$author_cell_type)
+    method_results_sub <- method_results[idxs, ]
+    method_results_sub$author_cell_type <- factor(method_results_sub$author_cell_type)
+    iono_dfs[[paste0(method, "_sub")]] <- method_results_sub
+}
+
+max_lfc <- floor(max(unlist(lapply(iono_dfs, function(x) {max(x$lfc)})))+1)
+min_lfc <- floor(min(unlist(lapply(iono_dfs, function(x) {min(x$lfc)}))))
+
+for (full_or_sub in c("_full", "_sub")) {
+    plot_list <- list()
+    x_lab <- paste0("Cell type", ifelse(full_or_sub == "_full", " ", "\n"),
+                    "[percentage of dataset]")
+    for (method in cirrhosis_methods) {
+        to_plot <- iono_dfs[[paste0(method, full_or_sub)]]
+        p <- create_beeswarm_plot_ct_abundance(to_plot, expDA_df,
+                                               "author_cell_type") +
+                theme(axis.text.y = element_text(size = 10)) +
+                ylim(min_lfc, max_lfc) +
+                xlab(x_lab) +
+                ylab("Log-fold change") +
+                ggtitle(pretty_title[method])
+        p$layers <- rev(p$layers)
+        plot_list[[method]] <- p
+    }
+
+    p <- ggarrange(plotlist = plot_list, nrow = 2, ncol = 2)
+    print(p)
+    p_name <- paste0(images_prefix,
+                     f("ionocytes_all_methods_beeswarms_ct_abundance{full_or_sub}.pdf"))
+    ggsave(filename = p_name, plot = p, dpi = 300, units = "cm", width = 50,
+           height = ifelse(full_or_sub == "_full", 60, 20), bg = "white")
+}
+```
+
+<img src="benchmarking_results_files/figure-html/generate_liver_beeswarms-3.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/generate_liver_beeswarms-4.png" style="display: block; margin: auto;" />
+
+
+```r
+# Drop NAs from Milo's results (not sure why they are being generated in the first place?). Plot proportion of cells (or in Milo's case neighbourhoods) called as DA in for each cell type.
+for (dataset in c("cirrhosis", "iono")) {
+    df <- bio_results[[dataset]] %>%
+            na.omit()
+
+    if (dataset == "cirrhosis") {
+        df <- df %>%
+                group_by(method, annotation_indepth, ct_prop)
+    } else if (dataset == "iono") {
+        df <- df %>%
+                group_by(method, author_cell_type, ct_prop)
+    } else {
+        stop("Unrecognized dataset: ", dataset)
+    }
+
+    df <- df %>%
+            mutate(method = factor(method,
+                                   levels = c("daseq", "cna", "milo",
+                                              "dawnn_pda", "dawnn_ada"),
+                                   labels = c("DA-seq", "CNA", "Milo",
+                                              "Dawnn-G", "Dawnn-L"))) %>%
+            summarize(pct_da = sum(is_da) / n(), pct_pos_da = sum(is_da & (lfc > 0)) / n())
+
+    for (da_type in c("pct_da", "pct_pos_da")) {
+        p <- ggplot(df, aes(x = ct_prop, y = .data[[da_type]], color = method)) +
+                geom_line(alpha = 0.3) +
+                geom_point(size = 0.5) +
+                xlab("Cell type proportion") +
+                ylab(paste0("Proportion of cells called as\n",
+                            ifelse(da_type == "pct_pos_da", "positively ", ""),
+                            "differentially abundant")) +
+                labs(color = "Method") +
+                theme_bw()
+        print(p)
+        ggsave(filename = paste0(images_prefix, dataset, "_", da_type,
+                                 "_vs_ct_abundance.png"),
+               plot = p, dpi = 300, units = "cm", width = 20, height = 7, bg="white")
+    }
+}
+```
+
+<img src="benchmarking_results_files/figure-html/da_calls_vs_cell_type_proportion-1.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/da_calls_vs_cell_type_proportion-2.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/da_calls_vs_cell_type_proportion-3.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/da_calls_vs_cell_type_proportion-4.png" style="display: block; margin: auto;" />
+
+```r
+# Now plot the amount of DA missed by each global method:
+ct_col <- ifelse(dataset == "cirrhosis", "annotation_indepth", "author_cell_type")
+p <- pivot_wider(df, names_from = method, values_from = pct_da) %>%
+        mutate(`Dawnn-L` - across(c(`DA-seq`, `Dawnn-G`, Milo)), .keep = "unused") %>%
+     pivot_longer(-c(.data[[ct_col]], ct_prop), names_to = "method",
+                  values_to = "pct_missed") %>%
+     ggplot(aes(x = ct_prop, y = pct_missed, color = method)) +
+         geom_line(alpha = 0.3) +
+         geom_point(size = 0.5) +
+         ylim(c(-1, 1)) +
+         xlab("Cell type proportion") +
+         ylab("Proportion more cells\ncalled as DA by Dawnn-L") +
+         labs(color = "Method") +
+         theme_bw()
+print(p)
+```
+
+<img src="benchmarking_results_files/figure-html/da_calls_vs_cell_type_proportion-5.png" style="display: block; margin: auto;" />
+
+```r
+ggsave(filename = paste0(images_prefix,
+                         "cirrhosis_pct_da_vs_ct_abundance_vs_dawnn_L.png"),
+       plot = p, dpi = 300, units = "cm", width = 20, height = 7, bg="white")
+```
+
+
+
+```r
+plot_proportion_called_da <- function(results, plot_filename, cell_type_name) {
+    tab <- table(results$is_da,
+           results[[cell_type_name]],
+           results$method)["TRUE", , ]
+    ct_freqs_long <- tab %>%
+              data.frame() %>%
+              rename(all_of(c("cell_type" = "Var1", "method" = "Var2",
+                     "freq" = "Freq"))) %>%
+              filter(method != "milo") %>%
+              mutate(method = case_when(method == "milo" ~ "Milo",
+                            method == "daseq" ~ "DA-seq",
+                            method == "dawnn_pda" ~ "Dawnn-G",
+                            method == "dawnn_ada" ~ "Dawnn-L"))
+
+    for (plot_type in c("", "_log")) {
+        p <- ggplot(ct_freqs_long, aes(x = cell_type, y = freq, fill = method)) +
+             geom_bar(position = "dodge", stat = "identity") +
+             scale_y_continuous(trans = ifelse(plot_type == "_log", "log10",
+                                               "identity")) +
+             scale_fill_manual(values = METHOD_COLS) +
+             xlab("Cell type") +
+             ylab("Number of DA cells") +
+             theme_bw() +
+             theme(plot.title = element_text(hjust = 0.5),
+                   legend.title = element_blank(),
+                   axis.text.x = element_text(angle = ifelse(cell_type_name == "annotation_lineage",45,90), hjust = 1))
+        print(p)
+        ggsave(filename = paste0(plot_filename, plot_type, ".pdf"), plot = p, dpi = 300,
+               units = "cm",
+               width = ifelse(cell_type_name == "annotation_lineage", 15, 30),
+               height = ifelse(cell_type_name == "annotation_lineage", 8, 12))
+    }
+
+    ct_freqs_wide <- ct_freqs_long %>%
+                        pivot_wider(names_from = method, values_from = freq) %>%
+                        mutate(across(c("Dawnn-L", "Dawnn-G"),
+                                  ~ paste0(comma(.),
+                                           " (", round(100*(./`DA-seq`))-100, "\\%)")
+                        )) %>%
+                        mutate(`DA-seq` = comma(`DA-seq`))
+    old_width <- options("width")$width
+    options(width = 250)
+    write.table(ct_freqs_wide, sep = " & ", quote = FALSE, row.names = FALSE,
+                col.names = FALSE, eol = " \\\\ \n")
+    options(width = old_width)
+}
+
+plot_proportion_called_da(bio_results[["cirrhosis"]],
+                          paste0(images_prefix, "liver_discovery_rates"),
+                          "annotation_lineage")
+```
+
+<img src="benchmarking_results_files/figure-html/proportion_called_da-1.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/proportion_called_da-2.png" style="display: block; margin: auto;" />
+
+```
+## Bcells & 1,260 & 1,344 (7\%) & 1,484 (18\%) \\ 
+## Cholangiocytes & 3,205 & 3,276 (2\%) & 3,284 (2\%) \\ 
+## Endothelia & 7,037 & 7,370 (5\%) & 7,445 (6\%) \\ 
+## Hepatocytes & 315 & 317 (1\%) & 318 (1\%) \\ 
+## ILCs & 8,910 & 9,656 (8\%) & 9,714 (9\%) \\ 
+## Mast cells & 29 & 52 (79\%) & 50 (72\%) \\ 
+## Mesenchyme & 1,858 & 2,008 (8\%) & 1,990 (7\%) \\ 
+## Mesothelia & 108 & 107 (-1\%) & 108 (0\%) \\ 
+## MPs & 7,590 & 8,261 (9\%) & 8,545 (13\%) \\ 
+## pDCs & 224 & 226 (1\%) & 245 (9\%) \\ 
+## Plasma Bcells & 670 & 712 (6\%) & 780 (16\%) \\ 
+## Tcells & 17,769 & 18,648 (5\%) & 18,718 (5\%) \\
+```
+
+```r
+levels(bio_results[["iono"]]$author_cell_type) <- gsub("%", "\\%",
+                                                       levels(bio_results[["iono"]]$author_cell_type))
+plot_proportion_called_da(bio_results[["iono"]],
+                          paste0(images_prefix, "copd_discovery_rates"),
+                          "author_cell_type")
+```
+
+<img src="benchmarking_results_files/figure-html/proportion_called_da-3.png" style="display: block; margin: auto;" /><img src="benchmarking_results_files/figure-html/proportion_called_da-4.png" style="display: block; margin: auto;" />
+
+```
+## Dendritic cells, plasmacytoid [0.07%] & 29 & 71 (145\%) & 33 (14\%) \\ 
+## Myoepithelial cells [0.07%] & 37 & 82 (122\%) & 56 (51\%) \\ 
+## Ionocytes [0.09%] & 18 & 104 (478\%) & 36 (100\%) \\ 
+## Neuroendocrine cells [0.12%] & 49 & 135 (176\%) & 58 (18\%) \\ 
+## Alveolar epithelial cells, type 1 [0.16%] & 29 & 179 (517\%) & 22 (-24\%) \\ 
+## Glial, Schwann cells [0.18%] & 135 & 206 (53\%) & 80 (-41\%) \\ 
+## Endothelial cells, arterial [0.22%] & 149 & 252 (69\%) & 181 (21\%) \\ 
+## Fibroblasts, alveolar-enriched [0.22%] & 124 & 250 (102\%) & 94 (-24\%) \\ 
+## T cells, interferon-stimulated [0.24%] & 252 & 286 (13\%) & 230 (-9\%) \\ 
+## Glandular, mucous cells [0.26%] & 212 & 295 (39\%) & 245 (16\%) \\ 
+## Endothelial cells, smooth muscle-like [0.44%] & 285 & 484 (70\%) & 94 (-67\%) \\ 
+## Plasma cells [0.45%] & 302 & 517 (71\%) & 193 (-36\%) \\ 
+## Chondrocytes, cartilage cells [0.46%] & 324 & 536 (65\%) & 234 (-28\%) \\ 
+## Pericytes [0.54%] & 269 & 607 (126\%) & 170 (-37\%) \\ 
+## Smooth muscle cells, airway-enriched [0.54%] & 356 & 631 (77\%) & 297 (-17\%) \\ 
+## T cells, resident memory [0.55%] & 549 & 639 (16\%) & 518 (-6\%) \\ 
+## Terminal airway-enriched secretory cells [0.62%] & 653 & 715 (9\%) & 625 (-4\%) \\ 
+## Undetermined or mixed [0.67%] & 568 & 680 (20\%) & 501 (-12\%) \\ 
+## Endothelial cells, lymphatic [0.75%] & 195 & 862 (342\%) & 243 (25\%) \\ 
+## Hybrid cells [0.76%] & 761 & 866 (14\%) & 665 (-13\%) \\ 
+## Pre-ciliated (deuterosomal) cells [0.77%] & 715 & 899 (26\%) & 483 (-32\%) \\ 
+## Fibroblasts, adventitial-enriched [0.93%] & 916 & 1,046 (14\%) & 448 (-51\%) \\ 
+## Glandular, serous cells [1.08%] & 1,136 & 1,249 (10\%) & 1,156 (2\%) \\ 
+## Macrophages, inflammatory, M1-like [1.09%] & 1,181 & 1,262 (7\%) & 1,126 (-5\%) \\ 
+## Smooth muscle cells, vascular enriched 2 [1.10%] & 610 & 1,272 (109\%) & 587 (-4\%) \\ 
+## Fibroblasts, matrix and myofibroblasts [1.14%] & 792 & 1,313 (66\%) & 399 (-50\%) \\ 
+## T cells, undefined [1.27%] & 978 & 1,360 (39\%) & 756 (-23\%) \\ 
+## Secretory cells, mucous [1.32%] & 1,418 & 1,500 (6\%) & 1,229 (-13\%) \\ 
+## Dendritic cells, conventional (myeloid) [1.42%] & 690 & 1,609 (133\%) & 635 (-8\%) \\ 
+## Macrophages, M1-2 intermediate [1.68%] & 781 & 1,826 (134\%) & 1,151 (47\%) \\ 
+## Natural killer cells [1.98%] & 1,059 & 2,275 (115\%) & 1,183 (12\%) \\ 
+## Intermediate cells [2.03%] & 1,917 & 2,337 (22\%) & 1,740 (-9\%) \\ 
+## Macrophages, non-inflammatory, M2-like [2.06%] & 1,638 & 2,125 (30\%) & 1,324 (-19\%) \\ 
+## Mast cells [2.34%] & 2,326 & 1,853 (-20\%) & 2,213 (-5\%) \\ 
+## Basal cells [2.52%] & 1,849 & 2,657 (44\%) & 2,028 (10\%) \\ 
+## Endothelial cells, capillary, aerocyte-enriched [2.95%] & 2,419 & 3,415 (41\%) & 2,986 (23\%) \\ 
+## Endothelial cells, capillary, common [2.96%] & 2,596 & 3,422 (32\%) & 2,849 (10\%) \\ 
+## Smooth muscle cells, vascular enriched 1 [3.05%] & 2,020 & 3,488 (73\%) & 971 (-52\%) \\ 
+## CD8+ enriched T, common subtype [3.08%] & 1,729 & 3,506 (103\%) & 2,346 (36\%) \\ 
+## Neutrophils [3.58%] & 4,026 & 4,140 (3\%) & 3,942 (-2\%) \\ 
+## Ciliated cells, secretory-like [3.86%] & 2,811 & 4,339 (54\%) & 2,441 (-13\%) \\ 
+## B cells [3.97%] & 2,680 & 4,425 (65\%) & 2,926 (9\%) \\ 
+## Secretory cells, major (common) subtype [4.12%] & 3,964 & 4,707 (19\%) & 3,384 (-15\%) \\ 
+## T-NK intermediate cells [4.18%] & 1,669 & 4,742 (184\%) & 2,561 (53\%) \\ 
+## Fibroblasts, common subtype [4.44%] & 3,621 & 4,910 (36\%) & 2,672 (-26\%) \\ 
+## Alveolar epithelial cells, type 2 [5.39%] & 5,143 & 6,074 (18\%) & 5,142 (0\%) \\ 
+## Monocytes [5.41%] & 3,690 & 6,129 (66\%) & 3,350 (-9\%) \\ 
+## Endothelial cells, venous; fenestrated [5.85%] & 3,932 & 6,354 (62\%) & 4,373 (11\%) \\ 
+## Ciliated cells, major (common) subtype [8.28%] & 6,471 & 8,881 (37\%) & 5,130 (-21\%) \\ 
+## T cells, central memory and naive [8.75%] & 7,883 & 9,986 (27\%) & 8,464 (7\%) \\
 ```
 
 # Runtime analysis
 
-Finally, we compare the runtimes of Dawnn, Milo, and DA-seq.
+We compare the runtimes of Dawnn, Milo, and DA-seq.
 
 
 ```r
-runtime_results <- read.csv("data_for_benchmarking_results/runtime_results_regen.csv",
-                            header = FALSE)
+runtime_results <- read.csv("benchmarking_rerun_2025/results/fully_sim/runtime_results_partial_daseq.csv",
+                            header = FALSE, sep = "\t")
 colnames(runtime_results) <- c("Method", "n", "t", "rep")
-runtime_results$Method[runtime_results$Method == "dawnn"] <- "Dawnn"
+runtime_results$Method[runtime_results$Method == "dawnn_pda"] <- "Dawnn-G"
+runtime_results$Method[runtime_results$Method == "dawnn_ada"] <- "Dawnn-L"
 runtime_results$Method[runtime_results$Method == "milo"] <- "Milo"
 runtime_results$Method[runtime_results$Method == "daseq"] <- "DA-seq"
+runtime_results$Method[runtime_results$Method == "cna"] <- "CNA"
 runtime_results$Method <- factor(runtime_results$Method,
-                                 levels = c("DA-seq", "Milo", "Dawnn"))
+                                 levels = c("DA-seq", "CNA", "Milo", "Dawnn-G",
+                                            "Dawnn-L"))
+runtime_results$t <- runtime_results$t / 60
+means <- runtime_results %>%
+            group_by(Method, n) %>%
+            summarize(mean = mean(t))
 
-runtime_plot <- ggplot(runtime_results, aes(x = n, y = t, color = Method)) +
-                geom_point() + xlab("Number of cells") + ylab("Time (secs)") +
-                scale_color_manual(values = c("#1E88E5", "#FFC107", "#D81B60")) +
+runtime_plot <- ggplot(runtime_results, aes(x = n/1000, y = t, color = Method)) +
+                geom_jitter(size = 1.5, alpha = 0.5, stroke = NA, width = 0.5) +
+                geom_line(data = means, aes(x = n / 1000, y = mean, color = Method)) +
+                xlab("Number of cells (1000s)") +
+                ylab("Time (minutes)") +
+                scale_y_continuous(breaks = seq(0, 2 * max(runtime_results$t),
+                                                by = 30)) +
+                scale_color_manual(values = METHOD_COLS) +
                 theme_classic() + theme(legend.title = element_blank())
-runtime_plot
+print(runtime_plot)
 ```
 
 <img src="benchmarking_results_files/figure-html/runtime_results-1.png" style="display: block; margin: auto;" />
 
 ```r
-ggsave(filename = "manuscript/images/runtime_plot.pdf", plot = runtime_plot,
-       dpi = 300, units = "cm", width = 20, height = 10)
+ggsave(filename = paste0(images_prefix, "runtime_plot.pdf"), plot = runtime_plot,
+       dpi = 300, units = "cm", width = 15, height = 10)
+```
+
+# Effect of cluster size
+
+
+```r
+get_total_l1 <- function(y) {
+    y + (2 * 0.5 * num_cells_cluster_1_2)
+}
+get_total_cells <- function(y) {
+    y + (2 * num_cells_cluster_1_2)
+}
+
+num_cells_cluster_1_2 <- 100
+df <- data.frame(num_cells_clust_3 = seq(10, 1000, 2)) %>%
+        cbind(num_L1_cells_clust_3 = round(0.6 * .$num_cells_clust_3)) %>%
+        cbind(prop_L1_cells_overall = sapply(.$num_L1_cells_clust_3,
+                                             get_total_l1) /
+                                      sapply(.$num_cells_clust_3,
+                                             get_total_cells)) %>%
+        cbind(prop_L1_cells_clust_3 = .$num_L1_cells_clust_3 /
+                                      .$num_cells_clust_3) %>%
+        cbind(LDA = .$prop_L1_cells_clust_3 - 0.5) %>%
+        cbind(GDA = .$prop_L1_cells_clust_3 - .$prop_L1_cells_overall) %>%
+        pivot_longer(cols = c("GDA", "LDA"),
+                     names_to = "score_type", values_to = "score")
+
+p <- ggplot(df, aes(x = num_cells_clust_3, y = score, color = score_type)) +
+        geom_line() +
+        scale_x_continuous(expand=c(0,0)) +
+        scale_y_continuous(expand=c(0,0)) +
+        scale_color_manual(values=c("GDA"="#D81B60", "LDA"="#1E88E5")) +
+        ylim(0, 0.15) +
+        xlab("Number of cells in Cluster 3") +
+        ylab("Score") +
+        geom_hline(yintercept=0.05, ) +
+        theme_bw() +
+        theme(legend.title = element_blank(), panel.grid = element_blank())
+print(p)
+```
+
+<img src="benchmarking_results_files/figure-html/effect_cluster_size-1.png" style="display: block; margin: auto;" />
+
+```r
+ggsave(paste0(images_prefix, "effect_class_imbalance_plot.pdf"), p, height = 2)
 ```
 
 # Session info
@@ -619,13 +1002,13 @@ sessionInfo()
 ```
 
 ```
-## R version 4.0.3 (2020-10-10)
-## Platform: x86_64-apple-darwin17.0 (64-bit)
-## Running under: macOS Big Sur 10.16
+## R version 4.2.3 (2023-03-15)
+## Platform: aarch64-apple-darwin20.0.0 (64-bit)
+## Running under: macOS 14.1
 ## 
 ## Matrix products: default
-## BLAS:   /Library/Frameworks/R.framework/Versions/4.0/Resources/lib/libRblas.dylib
-## LAPACK: /Library/Frameworks/R.framework/Versions/4.0/Resources/lib/libRlapack.dylib
+## BLAS:   /Users/georgehall2/miniconda3/envs/r_env_tin_oesophagus/lib/R/lib/libRblas.dylib
+## LAPACK: /Users/georgehall2/miniconda3/envs/r_env_tin_oesophagus/lib/R/lib/libRlapack.dylib
 ## 
 ## locale:
 ## [1] en_GB.UTF-8/en_GB.UTF-8/en_GB.UTF-8/C/en_GB.UTF-8/en_GB.UTF-8
@@ -634,35 +1017,25 @@ sessionInfo()
 ## [1] stats     graphics  grDevices utils     datasets  methods   base     
 ## 
 ## other attached packages:
-##  [1] rstatix_0.7.0        patchwork_1.1.0.9000 ggpubr_0.4.0        
-##  [4] plotly_4.10.0        forcats_0.5.1        stringr_1.4.0       
-##  [7] dplyr_1.1.0          purrr_0.3.4          readr_2.1.3         
-## [10] tidyr_1.2.0          tibble_3.1.8         ggplot2_3.4.0       
-## [13] tidyverse_1.3.1      rmarkdown_2.9       
+##  [1] rstatix_0.7.2   patchwork_1.1.3 ggpubr_0.6.0    plotly_4.10.3  
+##  [5] scales_1.4.0    lubridate_1.9.3 forcats_1.0.0   stringr_1.5.0  
+##  [9] dplyr_1.1.3     purrr_1.0.2     readr_2.1.4     tidyr_1.3.0    
+## [13] tibble_3.2.1    ggplot2_3.4.4   tidyverse_2.0.0
 ## 
 ## loaded via a namespace (and not attached):
-##  [1] matrixStats_0.61.0 fs_1.5.2           lubridate_1.8.0    RColorBrewer_1.1-2
-##  [5] httr_1.4.2         tools_4.0.3        backports_1.2.1    bslib_0.3.1       
-##  [9] utf8_1.2.2         R6_2.5.1           vipor_0.4.5        DBI_1.1.1         
-## [13] lazyeval_0.2.2     colorspace_2.0-2   withr_2.5.0        tidyselect_1.2.0  
-## [17] curl_4.3.2         compiler_4.0.3     textshaping_0.3.1  cli_3.6.0         
-## [21] rvest_1.0.2        xml2_1.3.3         sandwich_3.0-1     labeling_0.4.2    
-## [25] sass_0.4.0         scales_1.2.1       mvtnorm_1.1-1      systemfonts_1.0.1 
-## [29] digest_0.6.29      foreign_0.8-81     rio_0.5.27         pkgconfig_2.0.3   
-## [33] htmltools_0.5.2    highr_0.8          dbplyr_2.1.1       fastmap_1.1.0     
-## [37] htmlwidgets_1.5.4  rlang_1.0.6        readxl_1.3.1       rstudioapi_0.13   
-## [41] jquerylib_0.1.4    generics_0.1.3     farver_2.1.0       zoo_1.8-9         
-## [45] jsonlite_1.7.2     zip_2.1.1          car_3.0-11         magrittr_2.0.1    
-## [49] modeltools_0.2-23  Matrix_1.5-3       ggbeeswarm_0.6.0   Rcpp_1.0.7        
-## [53] munsell_0.5.0      fansi_0.5.0        abind_1.4-5        lifecycle_1.0.3   
-## [57] multcomp_1.4-20    stringi_1.7.6      yaml_2.2.1         carData_3.0-4     
-## [61] MASS_7.3-53.1      grid_4.0.3         parallel_4.0.3     crayon_1.4.2      
-## [65] lattice_0.20-41    haven_2.5.1        splines_4.0.3      hms_1.1.2         
-## [69] knitr_1.31         pillar_1.8.1       ggsignif_0.6.2     codetools_0.2-18  
-## [73] stats4_4.0.3       reprex_2.0.1       glue_1.6.2         evaluate_0.14     
-## [77] data.table_1.14.2  modelr_0.1.8       vctrs_0.5.2        tzdb_0.3.0        
-## [81] cellranger_1.1.0   gtable_0.3.0       assertthat_0.2.1   xfun_0.24         
-## [85] openxlsx_4.2.5     coin_1.4-2         libcoin_1.0-9      broom_1.0.3       
-## [89] ragg_1.1.1         survival_3.2-7     viridisLite_0.4.0  beeswarm_0.3.1    
-## [93] TH.data_1.1-1      ellipsis_0.3.2
+##  [1] digest_0.6.33      utf8_1.2.4         R6_2.5.1           backports_1.4.1   
+##  [5] evaluate_0.22      httr_1.4.7         highr_0.10         pillar_1.9.0      
+##  [9] rlang_1.1.1        lazyeval_0.2.2     data.table_1.14.8  car_3.1-2         
+## [13] jquerylib_0.1.4    rmarkdown_2.25     textshaping_0.3.7  labeling_0.4.3    
+## [17] htmlwidgets_1.6.2  broom_1.0.5        vipor_0.4.5        compiler_4.2.3    
+## [21] xfun_0.40          pkgconfig_2.0.3    systemfonts_1.0.5  ggbeeswarm_0.7.2  
+## [25] htmltools_0.5.6.1  tidyselect_1.2.0   gridExtra_2.3      fansi_1.0.5       
+## [29] viridisLite_0.4.2  tzdb_0.4.0         withr_2.5.2        grid_4.2.3        
+## [33] jsonlite_1.8.7     gtable_0.3.6       lifecycle_1.0.3    magrittr_2.0.3    
+## [37] cli_3.6.1          stringi_1.7.12     cachem_1.0.8       carData_3.0-5     
+## [41] farver_2.1.1       ggsignif_0.6.4     bslib_0.5.1        ragg_1.2.6        
+## [45] generics_0.1.3     vctrs_0.6.4        cowplot_1.1.1      RColorBrewer_1.1-3
+## [49] tools_4.2.3        dichromat_2.0-0.1  beeswarm_0.4.0     glue_1.6.2        
+## [53] hms_1.1.3          abind_1.4-5        fastmap_1.1.1      yaml_2.3.7        
+## [57] timechange_0.3.0   knitr_1.45         sass_0.4.7
 ```
